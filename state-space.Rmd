@@ -1,0 +1,183 @@
+---
+title: "状態空間モデル"
+output: html_notebook
+---
+
+# Today's dataset
+
+### 今日使うデータ
+
+- datasetsパッケージに含まれるNileデータを用いる
+- 1871-1970年の100年間のナイル川での年間河川流量($10^8 m^3$) に関する時系列データ
+- 1898年のアスワンダム建設により, 流量が変化している
+- 流量データのみが格納されているため, 年情報を追加したデータセットに変換する
+
+```{r}
+data(Nile, package = "datasets")
+Nile.df <- data.frame("flow" = Nile,
+                      "year" = 1871:1970)
+```
+
+### データ構造
+
+- データ構造を確認する
+
+```{r}
+library(dplyr)
+glimpse(Nile.df)
+```
+
+### 記述統計
+
+- 記述統計を確認する
+
+```{r}
+summary(Nile.df)
+```
+
+### データの可視化
+
+- ナイル川の流量を可視化して概要を把握する
+
+```{r}
+library(ggplot2)
+ggplot(Nile.df) +
+  aes(x = year,
+      y = flow) +
+  geom_line(colour = "blue") +
+  labs(y = "Annual Flow", 
+       x = "Year") 
+```
+
+# 時系列モデルの推定
+
+### モデル選択
+
+- `forecast::auto.arima()`関数を用いてAICを基準に最適な時系列モデルを選択を行う
+- ARIMA(1,1,1)が選択される
+
+```{r}
+install.packages("forecast")
+library(forecast)
+model.Nile <- auto.arima(
+  Nile.df$flow,
+  ic = "aic",
+  trace = T,
+  stepwise = F,
+  approximation = F
+)
+```
+
+### 結果の確認
+
+- `stargazer`も`jtools`も対応していないため, `summary`で結果を確認する
+
+```{r}
+summary(model.Nile)
+```
+
+### ARIMAモデルによる予測の図示
+
+- `forecast()`関数を利用して予測を行う
+    - 基本的に先のことはあまりわからない
+
+```{r}
+forecast(model.Nile, 
+         level = c(95),
+         h = 10) %>% 
+  plot()
+```
+
+# State Space Model
+
+### モデルの型の指定
+
+- まずは, ローカルレベルモデル(ランダムウォーク+ノイズモデル)を推定する
+- はじめに, 状態空間モデルの型を指定する
+    - `order`はでローカルレベルモデル(1)か, ローカルトレンドモデル(2)かを指定する
+    - `dv`で観測方程式のモデルを指定し, `dW`で状態の分散行列の対角成分を指定, `m0`で初期値を指定する
+
+```{r}
+buildModPoly1 <- function(theta){
+  dlmModPoly(order = 1,
+             dV = exp(theta[1]),
+             dW = exp(theta[2]),
+             m0 = theta[3])     
+}
+```
+
+### モデルの推定
+
+- `dlm::dlmMLE()`関数を利用して型に入れるパラメーターを推定する
+
+```{r}
+install.packages("dlm")
+library(dlm)
+library(magrittr)
+Nile.local <- Nile.df %$% 
+  dlmMLE(flow, 
+         parm = c(1, 1, flow[1]), 
+         buildModPoly1)
+Nile.local
+```
+
+
+### モデルの再編
+
+- 推定したパラメータを使ってモデルを組み直す
+- Vは観測誤差の大きさ(分散)を, Wは状態の変動の大きさ(プロセスエラーの分散)を表す
+
+```{r}
+mod.Nile <- buildModPoly1(Nile.local$par)
+mod.Nile
+```
+
+### フィルタリング
+
+- 次に, パラメーターを型に入れてカルマンフィルターによるフィルタリングを行う
+
+```{r}
+Nile.filt <- dlmFilter(Nile.df$flow, mod.Nile)
+Nile.filt$m
+```
+
+### フィルタリング結果の図示
+
+フィルタリングの結果を可視化します(オレンジ色)
+
+```{r}
+ggplot(Nile.df) +
+  aes(x = year,
+      y = flow) +
+  geom_line(colour = "blue") +
+  geom_line(aes(y = Nile.filt$m[2:101]), 
+            colour = "orange") +
+  labs(y = "Annual Flow",
+       x = "Year") 
+```
+
+### スムージング
+
+- 最後にカルマンフィルターの結果を使ってスムージングを適用する
+
+```{r}
+Nile.smooth <- dlmSmooth(Nile.filt)
+Nile.smooth$s
+```
+
+### スムージング結果の図示
+
+スムージングの結果を可視化します(赤色)
+
+```{r}
+ggplot(Nile.df) +
+  aes(x = year,
+      y = flow) +
+  geom_line(colour = "blue") +
+  geom_line(aes(y = Nile.filt$m[2:101]),
+            colour = "orange") +
+  geom_line(aes(y = Nile.smooth$s[2:101]),
+            colour = "red") +
+  labs(y = "Annual Flow",
+       x = "Year") 
+```
